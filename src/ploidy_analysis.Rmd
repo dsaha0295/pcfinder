@@ -1,0 +1,1228 @@
+---
+title: "PACCs analysis of scRNA PC3/MDA cells w/ Cisplatin/Docetaxel and validation in scRNA and bulk RNA for mCRPC"
+output: html_notebook
+---
+#Load libraries
+```{r}
+
+library(Seurat)
+library(copykat)
+library(tidyverse)
+library(SeuratDisk)
+library(mclust)
+library(matrixStats)
+library(corrplot)
+library(biomaRt)
+library(ggpubr)
+library(msigdbr)
+library(ggsci)
+library(GSVA)
+library(GSEABase)
+library(data.table)
+options(future.globals.maxSize = 4000 * 1024^5)
+library(MAST)
+library(rcartocolor)
+hallmark_sets <- msigdbr(species = "Homo sapiens", category = "H")
+#hallmark_sets %>% saveRDS(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/data/hallmark_pathways.RDS")
+
+```
+
+
+# ==============================================================================================================================
+# Section 1:Processing copyKAT results for Docetaxel/Cisplatin treated PC3 cells, plotting and creating features for classifiers
+# ==============================================================================================================================
+#Select colors
+```{r}
+
+# Extract AAAS palette
+aaas_colors <- pal_aaas("default")(10)  # 10 predefined AAAS colors
+# Extend it by repeating or rotating
+n_needed <- 100
+my_colors <- rep(aaas_colors, length.out = n_needed)
+
+
+```
+
+
+#Load Hallmark pathways
+```{r}
+hallmark_sets <- msigdbr(species = "Homo sapiens", category = "H")
+#Create gene sets associated with PACCs
+#paccs_sets <- filter(hallmark_sets, grepl(pattern = "STAT5|INTERFERON|COAGULATION|APOPTOSIS|AUTOPHAGY|INFLAMMATORY|TNF|COMPLEMENT", x = gs_name)) %>%
+ # group_by(gs_name) %>%
+#  summarise(genes = list(unique(gene_symbol))) %>%
+  #deframe()
+paccs_sets <- hallmark_sets %>%
+  group_by(gs_name) %>%
+  summarise(genes = list(unique(gene_symbol))) %>%
+  deframe()
+
+```
+
+
+#Feature calculation for Docetaxel treated PC3 cells
+```{r}
+#Download downsampled seurat object
+scrna <- readRDS(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/pc3_analysis//scrna_ds_pc3_d.rds")
+scrna <- subset(scrna, subset = Notation %in% c("PC3", "d1", "d5", "d10"))
+scrna <- scrna %>% NormalizeData() %>% FindVariableFeatures() %>% ScaleData()
+
+
+#Module scoring stored in metadata
+scrna <- AddModuleScore(object = scrna, features = paccs_sets, nbin = 10, name = names(paccs_sets))
+
+#Load copykat results
+copykat.res <- readRDS(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/pc3_analysis/copykatres_pc3_d.rds")
+sc.meta <- scrna@meta.data
+
+# Extract just the numeric CNV calls (columns = cells)
+chrom_info <- copykat.res[[1]]$CNAmat[, 1]   # Assuming first column is chromosome names
+cnv_numeric <- copykat.res[[1]]$CNAmat[, -(1:3)] #Columns as cells rows as copynumber calls relative to reference for each bin
+
+# Sum of absolute CNV deviation per cell
+cnv_burden <- colSums(abs(as.matrix(cnv_numeric)), na.rm = TRUE)
+
+# Convert to data.table for plotting
+cnv_summary <- data.frame(
+  cell = names(cnv_burden),
+  abs_cnv = cnv_burden
+)
+
+#Add gain and losses 
+cnv_gains <- colSums(cnv_numeric > 0.1, na.rm = TRUE)
+cnv_losses <- colSums(cnv_numeric < -0.1, na.rm = TRUE)
+cnv_summary$gains <- cnv_gains[cnv_summary$cell]
+cnv_summary$losses <- cnv_losses[cnv_summary$cell]
+cnv_summary$losses <- cnv_losses[cnv_summary$cell]
+cnv_summary <- mutate(cnv_summary, cnv_total = gains + losses)
+
+#Merge metadata from seurat object w/ CNV calls - left joined so if there is no cnv data then just NA for that cell and dropped in downstream analysis
+sc.meta <- sc.meta %>% mutate(cell = sub(pattern = "-", replacement = "\\.", x = row.names(.))) %>% left_join(cnv_summary)
+
+#Conver to long format
+sc.meta.long <- sc.meta  %>% dplyr::select(Percent.MT, S.Score, cnv_total, nCount_RNA,nFeature_RNA, G2M.Score, cell, Notation, starts_with("HALLMARK")) %>% pivot_longer(cols = -c("cell", "Notation")) %>% mutate(Notation = ifelse(is.na(Notation), "Spike-in", Notation)) %>% mutate(Notation = factor(x = Notation, levels = c("Spike-in", "PC3", "d1", "d5", "d10")))
+
+
+#Plot features across treatments
+plt <- sc.meta.long %>% 
+  # 1. Filter out Hallmark genes
+  dplyr::filter(!grepl(pattern = "HALLMARK", x = name)) %>%
+  # 2. Rename 'name' values for the facet and 'Notation' for the axis
+  mutate(
+    name = ifelse(name == "cnv_total", "Total CNV", name), # Replace 'old_name_here'
+    Notation = recode(Notation, 
+                      "PC3" = "Untreated", 
+                      "d1" = "D1", 
+                      "d5" = "D5", 
+                      "d10" = "D10"),
+    Notation = factor(Notation, levels = c("Untreated", "D1", "D5", "D10"))
+  ) %>%
+  ggplot(aes(x = Notation, y = value, fill = name)) +
+  geom_boxplot(outlier.shape = NA) +
+  theme_bw(base_size = 20) +
+  ylab("Features") +
+  scale_fill_viridis_d(option = "D") +
+  facet_wrap(~ name, scale = "free") +
+  theme(
+    legend.position = "none", 
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+ggsave("/Users/debanjansaha/Desktop/pc3_cnv_boxplot_d.pdf", plt, width = 10)
+
+#Write metadata to csv file - filter out Spike-in and C1 cells (unclear if these undergo WGD)
+#sc.meta %>% dplyr::select(Percent.MT, S.Score, cnv_total, nCount_RNA,nFeature_RNA, G2M.Score, cell, Notation, starts_with("HALLMARK")) %>% filter(!(Notation %in% c(NA, "d1") ))%>% write.csv(file = "/Users/debanjansaha/Desktop/copykatres_pc3_d_meta.csv")
+#ggsave("/Users/debanjansaha/Desktop/pc3_cnv_boxplot_d.pdf", plt)
+
+
+```
+
+#Plots for CN profile of Docetaxel treated PC3 cells
+```{r}
+
+copykat.res <- readRDS(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/pc3_analysis//copykatres_pc3_d.rds")
+
+avg_cnv <- copykat.res[[1]]$CNAmat %>% mutate(coord = paste0(chrom, ".", chrompos)) %>% dplyr::select(-c(1:3)) %>% column_to_rownames(var = "coord") %>% t() %>% as.data.frame() %>% mutate(cell = row.names(.)) %>% mutate(Notation = case_when(
+  grepl(pattern = "untreated_", x = cell) ~"Untreated",
+  grepl(pattern = "c1_", x = cell) ~"C1",
+  grepl(pattern = "c5_", x = cell) ~ "C5",
+  grepl(pattern = "c10_", x = cell) ~ "C10",
+  grepl(pattern = "d1_", x = cell) ~ "D1",
+  grepl(pattern = "d5_", x = cell) ~ "D5",
+  grepl(pattern = "d10_", x = cell) ~ "D10",
+  TRUE ~ "Spike-in"
+  
+)) %>%
+  dplyr::select(-cell) %>%                    
+  group_by(Notation) %>%
+  summarize(across(everything(), mean, na.rm = TRUE)) 
+
+# Ensure chrom is character BEFORE factorizing
+avg_cnv <- avg_cnv %>%
+  pivot_longer(cols = -Notation) %>%
+  separate(name, into = c("chrom", "pos"), sep = "\\.", convert = FALSE) %>%  # <- DO NOT convert
+  mutate(
+    chrom = factor(chrom, levels = as.character(1:23)),  # correct levels
+    pos = as.integer(pos)
+  ) %>%
+  arrange(chrom, pos) %>%
+  mutate(genome_x = dense_rank(interaction(chrom, pos, lex.order = TRUE)))
+
+# Compute chromosome label positions
+chrom_labels <- avg_cnv %>%
+  group_by(chrom) %>%
+  summarize(midpoint = median(genome_x)) 
+
+
+# Plot with chromosome labels on x-axis
+plt <- avg_cnv %>%
+  ggplot(aes(x = genome_x, y = value, color = Notation)) +
+  ggpubr::theme_pubr(base_size = 20) +
+  scale_x_continuous(
+    name = "Chromosome",
+    breaks = chrom_labels$midpoint,
+    labels = chrom_labels$chrom
+  ) +
+  labs(y = "CN Deviation") + theme(axis.text.x = element_text(angle = 90)) + geom_line(alpha = 0.8, size = 0.8) + rcartocolor::scale_color_carto_d(palette = "Bold")
+plt
+ggsave("/Users/debanjansaha/Desktop/pc_plots_v4/pc3_cnplot_d.pdf", plt, width = 15)
+
+
+chrom = "2"
+plt <- avg_cnv %>% filter(chrom == 2) %>% ggplot(aes(x = order(pos, genome_x), y = value, color = Notation)) + ggpubr::theme_pubr(base_size = 20) + geom_line(alpha = 0.8, size = 0.8) + xlab(paste0("Chromosome: ", chrom)) + ylab("CN deviation")+ rcartocolor::scale_color_carto_d(palette = "Bold")
+ggsave(paste0("/Users/debanjansaha/Desktop/pc_plots_v4/pc3_cnplot_d_", chrom, ".pdf"), plt, width = 10)
+
+
+
+```
+
+
+#Feature calculation for Cisplatin treated PC3 cells
+```{r}
+#Read in downsampled seurat object
+scrna <- readRDS(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/pc3_analysis//scrna_ds_pc3_c.rds")
+#hallmark_sets <- msigdbr(species = "Homo sapiens", category = "H")
+scrna <- subset(scrna, subset = Notation %in% c("PC3", "c1", "c5", "c10"))
+scrna <- scrna %>% NormalizeData() %>% FindVariableFeatures() %>% ScaleData()
+scrna <- AddModuleScore(object = scrna, features = paccs_sets, name = names(paccs_sets), nbin = 10)
+
+
+#Run PCA
+scrna <- RunPCA(scrna)
+
+#Run UMAP
+scrna <- RunUMAP(scrna, dims = 1:20, return.model = T)
+
+#Copy UMAP embeddings
+umap_coords <- Embeddings(scrna, "umap")
+scrna$UMAP_1 <- umap_coords[, 1]
+scrna$UMAP_2 <- umap_coords[, 2]
+
+#Load copykat results
+copykat.res <- readRDS(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/pc3_analysis//copykatres_pc3_c.rds")
+sc.meta <- scrna@meta.data
+
+#Extract just the numeric CNV calls (columns = cells)
+chrom_info <- copykat.res[[1]]$CNAmat[, 1]   # Assuming first column is chromosome names
+cnv_numeric <- copykat.res[[1]]$CNAmat[, -(1:3)] #Columns as cells rows as copynumber calls relative to reference for each bin
+
+#Sum of absolute CNV deviation per cell
+cnv_burden <- colSums(abs(as.matrix(cnv_numeric)), na.rm = TRUE)
+
+#Convert to data.table for plotting
+cnv_summary <- data.frame(
+  cell = names(cnv_burden),
+  abs_cnv = cnv_burden
+)
+
+#Add gain and losses 
+cnv_gains <- colSums(cnv_numeric > 0.1, na.rm = TRUE)
+cnv_losses <- colSums(cnv_numeric < -0.1, na.rm = TRUE)
+cnv_summary$gains <- cnv_gains[cnv_summary$cell]
+cnv_summary$losses <- cnv_losses[cnv_summary$cell]
+cnv_summary$losses <- cnv_losses[cnv_summary$cell]
+cnv_summary <- mutate(cnv_summary, cnv_total = gains + losses)
+
+#Merge metadata from seurat object w/ CNV calls - left joined so if there is no cnv data then just NA for that cell and dropped in downstream analysis
+sc.meta <- sc.meta %>% mutate(cell = sub(pattern = "-", replacement = "\\.", x = row.names(.))) %>% left_join(cnv_summary)
+
+sc.meta.long <- sc.meta  %>% 
+  dplyr::select(Percent.MT, S.Score, cnv_total, nCount_RNA,nFeature_RNA, G2M.Score, cell, Notation, starts_with("HALLMARK")) %>% pivot_longer(cols = -c("cell", "Notation")) %>% mutate(Notation = ifelse(is.na(Notation), "Spike-in", Notation)) %>% 
+  mutate(Notation = factor(x = Notation, levels = c("PC3", "c1", "c5", "c10")))  
+
+#Plot features across treatments
+ 
+plt <-  sc.meta.long %>% 
+  # 1. Filter out Hallmark genes
+  dplyr::filter(!grepl(pattern = "HALLMARK", x = name)) %>%
+  # 2. Rename 'name' values for the facet and 'Notation' for the axis
+  mutate(
+    name = ifelse(name == "cnv_total", "Total CNV", name), # Replace 'old_name_here'
+    Notation = recode(Notation, 
+                      "PC3" = "Untreated", 
+                      "c1" = "C1", 
+                      "c5" = "C5", 
+                      "c10" = "C10"),
+    Notation = factor(Notation, levels = c("Untreated", "C1", "C5", "C10"))
+  ) %>%
+  ggplot(aes(x = Notation, y = value, fill = name)) +
+  geom_boxplot(outlier.shape = NA) +
+  theme_bw(base_size = 20) +
+  ylab("Features") +
+  scale_fill_viridis_d(option = "D") +
+  facet_wrap(~ name, scale = "free") +
+  theme(
+    legend.position = "none", 
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+#Write metadata to csv file - filter out Spike-in and C1 cells (unclear if these undergo WGD)
+#sc.meta %>% dplyr::select(c(Percent.MT, S.Score, cnv_total, nCount_RNA,nFeature_RNA, G2M.Score, cell, Notation, starts_with("HALLMARK"))) %>% filter(!(Notation %in% c(NA, "c1") ))%>% write.csv(file = "/Users/debanjansaha/Desktop/copykatres_pc3_c_meta.csv")
+
+
+ggsave("/Users/debanjansaha/Desktop/pc_plots_v4/pc3_cnv_boxplot_c.pdf", plt, width = 10)
+
+
+
+```
+
+
+
+#Plots for CN profile of Cisplatin treated PC3 cells
+```{r}
+copykat.res <- readRDS(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/pc3_analysis//copykatres_pc3_c.rds")
+
+avg_cnv <- copykat.res[[1]]$CNAmat %>% mutate(coord = paste0(chrom, ".", chrompos)) %>% dplyr::select(-c(1:3)) %>% column_to_rownames(var = "coord") %>% t() %>% as.data.frame() %>% mutate(cell = row.names(.)) %>% mutate(Notation = case_when(
+  grepl(pattern = "untreated_", x = cell) ~"Untreated",
+  grepl(pattern = "c1_", x = cell) ~"Cisplatin 1DPT",
+  grepl(pattern = "c5_", x = cell) ~ "Cisplatin 5DPT",
+  grepl(pattern = "c10_", x = cell) ~ "Cisplatin 10DPT",
+  grepl(pattern = "d1_", x = cell) ~ "Docetaxel 1DPT",
+  grepl(pattern = "d5_", x = cell) ~ "Docetaxel 5DPT",
+  grepl(pattern = "d10_", x = cell) ~ "Docetaxel 10",
+  TRUE ~ "Spike-in"
+  
+)) %>%
+  dplyr::select(-cell) %>%                    
+  group_by(Notation) %>%
+  summarize(across(everything(), mean, na.rm = TRUE)) 
+
+# Ensure chrom is character BEFORE factorizing
+avg_cnv <- avg_cnv %>%
+  pivot_longer(cols = -Notation) %>%
+  separate(name, into = c("chrom", "pos"), sep = "\\.", convert = FALSE) %>%  # <- DO NOT convert
+  mutate(
+    chrom = factor(chrom, levels = as.character(1:23)),  # correct levels
+    pos = as.integer(pos)
+  ) %>%
+  arrange(chrom, pos) %>%
+  mutate(genome_x = dense_rank(interaction(chrom, pos, lex.order = TRUE)))
+
+# Compute chromosome label positions
+chrom_labels <- avg_cnv %>%
+  group_by(chrom) %>%
+  summarize(midpoint = median(genome_x)) 
+avg_cnv$Notation <- factor(avg_cnv$Notation, 
+                      levels = c( "Spike-in", "Untreated",
+                                 "Cisplatin 1DPT", "Cisplatin 5DPT", "Cisplatin 10DPT"))
+
+# Plot with chromosome labels on x-axis
+plt <- avg_cnv %>%
+  ggplot(aes(x = genome_x, y = value, color = Notation)) +
+  ggpubr::theme_pubr(base_size = 20) +
+  scale_x_continuous(
+    name = "Chromosome",
+    breaks = chrom_labels$midpoint,
+    labels = chrom_labels$chrom
+  ) +
+  labs(y = "CN Deviation") + theme(axis.text.x = element_text(angle = 90)) + geom_line(alpha = 0.8, size = 0.8) + scale_color_viridis_d(option = "D", direction = -1)
+
+plt
+ggsave("/Users/debanjansaha/Desktop/pc3_cnplot_c.pdf", plt, width = 15)
+
+
+chrom = 2
+plt <- avg_cnv %>% filter(chrom == 2) %>% ggplot(aes(x = order(pos, genome_x), y = value, color = Notation)) + theme_pubr(base_size = 20) + geom_line(alpha = 0.8, size = 0.8) + xlab(paste0("Chromosome: ", chrom)) + ylab("CN deviation") + scale_color_viridis_d(option = "D", direction = -1)
+ggsave(paste0("/Users/debanjansaha/Desktop/pc_plots_v4/pc3_cnplot_c_", chrom, ".pdf"), plt, width = 11)
+
+
+```
+
+
+
+# ==============================================================================================================================
+# Section 2: Processing single cell RNA data for MDA cellines and processing copyKAT output for testing classifiers
+# ==============================================================================================================================
+
+#MDA cells with cisplatin
+```{r}
+
+#Read in downsampled seurat object
+scrna <- readRDS(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/mda_analysis/scrna_ds_mda_c.rds")
+scrna <- subset(scrna, subset = Group %in% c("untreated", "c1", "c5", "c10"))
+scrna <- scrna %>% NormalizeData() %>% FindVariableFeatures() %>% ScaleData()
+scrna <- AddModuleScore(object = scrna, features = paccs_sets, nbin = 10, name = names(paccs_sets))
+
+
+#Load copykat results
+copykat.res <- readRDS(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/mda_analysis//copykatres_mda_c.rds")
+sc.meta <- scrna@meta.data
+
+# Extract just the numeric CNV calls (columns = cells)
+chrom_info <- copykat.res[[1]]$CNAmat[, 1]   # Assuming first column is chromosome names
+cnv_numeric <- copykat.res[[1]]$CNAmat[, -(1:3)] #Columns as cells rows as copynumber calls relative to reference for each bin
+
+# Sum of absolute CNV deviation per cell
+cnv_burden <- colSums(abs(as.matrix(cnv_numeric)), na.rm = TRUE)
+
+# Convert to data.table for plotting
+cnv_summary <- data.frame(
+  cell = names(cnv_burden),
+  abs_cnv = cnv_burden
+)
+
+#Add gain and losses 
+cnv_gains <- colSums(cnv_numeric > 0.1, na.rm = TRUE)
+cnv_losses <- colSums(cnv_numeric < -0.1, na.rm = TRUE)
+cnv_summary$gains <- cnv_gains[cnv_summary$cell]
+cnv_summary$losses <- cnv_losses[cnv_summary$cell]
+cnv_summary$losses <- cnv_losses[cnv_summary$cell]
+cnv_summary <- mutate(cnv_summary, cnv_total = gains + losses)
+
+
+#Merge metadata from seurat object w/ CNV calls - left joined so if there is no cnv data then just NA for that cell and dropped in downstream analysis
+sc.meta <- sc.meta %>% mutate(cell = sub(pattern = "-", replacement = "\\.", x = row.names(.))) %>% left_join(cnv_summary)
+
+#Save to csv
+sc.meta %>% dplyr::select(Percent.MT, S.Score, cnv_total, nCount_RNA,nFeature_RNA, G2M.Score, cell, Group, starts_with("HALLMARK")) %>% filter(!(Group %in% c(NA, "c1") ))%>% write.csv(file = "/Users/debanjansaha/Desktop/copykatres_mda_c_meta.csv")
+```
+
+#MDA cells with docetaxel
+```{r}
+
+#Read in downsampled seurat object
+scrna <- readRDS(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/mda_analysis//scrna_ds_mda_d.rds")
+scrna <- subset(scrna, subset = Group %in% c("untreated", "d1", "d5", "d10"))
+scrna <- scrna %>% NormalizeData() %>% FindVariableFeatures() %>% ScaleData()
+scrna <- AddModuleScore(object = scrna, features = paccs_sets, nbin = 10, name = names(paccs_sets))
+
+
+#Load copykat results
+copykat.res <- readRDS(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/mda_analysis//copykatres_mda_d.rds")
+sc.meta <- scrna@meta.data
+
+# Extract just the numeric CNV calls (columns = cells)
+chrom_info <- copykat.res[[1]]$CNAmat[, 1]   # Assuming first column is chromosome names
+cnv_numeric <- copykat.res[[1]]$CNAmat[, -(1:3)] #Columns as cells rows as copynumber calls relative to reference for each bin
+
+# Sum of absolute CNV deviation per cell
+cnv_burden <- colSums(abs(as.matrix(cnv_numeric)), na.rm = TRUE)
+
+# Convert to data.table for plotting
+cnv_summary <- data.frame(
+  cell = names(cnv_burden),
+  abs_cnv = cnv_burden
+)
+
+#Add gain and losses 
+cnv_gains <- colSums(cnv_numeric > 0.1, na.rm = TRUE)
+cnv_losses <- colSums(cnv_numeric < -0.1, na.rm = TRUE)
+cnv_summary$gains <- cnv_gains[cnv_summary$cell]
+cnv_summary$losses <- cnv_losses[cnv_summary$cell]
+cnv_summary$losses <- cnv_losses[cnv_summary$cell]
+cnv_summary <- mutate(cnv_summary, cnv_total = gains + losses)
+
+
+#Merge metadata from seurat object w/ CNV calls - left joined so if there is no cnv data then just NA for that cell and dropped in downstream analysis
+sc.meta <- sc.meta %>% mutate(cell = sub(pattern = "-", replacement = "\\.", x = row.names(.))) %>% left_join(cnv_summary)
+
+
+#Save to csv
+sc.meta %>% dplyr::select(Percent.MT, S.Score, cnv_total, nCount_RNA,nFeature_RNA, G2M.Score, cell, Group, starts_with("HALLMARK")) %>% filter(!(Group %in% c(NA, "d1") ))%>% write.csv(file = "/Users/debanjansaha/Desktop/copykatres_mda_d_meta.csv")
+
+
+
+
+```
+
+
+
+#Sensitivity analysis
+
+
+```{r}
+
+
+# Combine all entries into one tidy dataframe
+auc_df_d <- read.csv(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/sensitivity_analysis/auc_mda_d.csv")
+
+
+auc_df_d <- auc_df_d %>%
+  mutate(
+    spikein   = str_extract(sample_id, "spk\\d+") %>% str_remove("spk"),
+    untreated = str_extract(sample_id, "ut\\d+")  %>% str_remove("ut"),
+    d1 = str_extract(sample_id, "d1\\d+")  %>% str_remove("d1"),
+    d5 = str_extract(sample_id, "d5\\d+")  %>% str_remove("d5"),
+    d10 = str_extract(sample_id, "d10\\d+")  %>% str_remove("d10"),  ) %>%
+  rowwise() %>%
+  mutate(
+    Dataset_label = paste0(
+      "Spikein: ", spikein,
+      ", Untreated: ", untreated,
+      ", 1DPT: ", d1,
+      ", 5DPT: ", d5,
+      ", 10DPT: ", d10)) %>%
+  ungroup() %>%
+  dplyr::select(-spikein, -untreated, -d1, -d5, -d10)
+
+plt1 <- auc_df_d %>% ggplot(aes(y = Dataset_label, x = auc, color = model)) + geom_jitter() + xlim(c(0.5,1.05)) + theme_bw(base_size = 10) + scale_color_aaas(name = "Model") + ylab("MDA with Docetaxel") + xlab("AUC") + theme(legend.text = element_text(size = 12), legend.title = element_text(size = 12))
+
+
+# Combine all entries into one tidy dataframe
+auc_df_c <- read.csv(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/sensitivity_analysis/auc_mda_c.csv")
+
+auc_df_c <- auc_df_c %>%
+  mutate(
+    spikein   = str_extract(sample_id, "spk\\d+") %>% str_remove("spk"),
+    untreated = str_extract(sample_id, "ut\\d+")  %>% str_remove("ut"),
+    d1 = str_extract(sample_id, "d1\\d+")  %>% str_remove("d1"),
+    d5 = str_extract(sample_id, "d5\\d+")  %>% str_remove("d5"),
+    d10 = str_extract(sample_id, "d10\\d+")  %>% str_remove("d10"),  ) %>%
+  rowwise() %>%
+  mutate(
+    Dataset_label = paste0(
+      "Spikein: ", spikein,
+      ", Untreated: ", untreated,
+      ", 1DPT: ", d1,
+      ", 5DPT: ", d5,
+      ", 10DPT: ", d10)) %>%
+  ungroup() %>%
+  dplyr::select(-spikein, -untreated, -d1, -d5, -d10)
+
+plt2 <- auc_df_c %>% ggplot(aes(y = Dataset_label, x = auc, color = model)) + geom_jitter() + xlim(c(0.5,1.05)) + theme_bw(base_size = 10) + scale_color_viridis_d(name = "Model") + ylab("MDA with Cisplatin") + xlab("AUC") +   theme(legend.position = "none")
+
+
+pdf(file = "/Users/debanjansaha/Desktop/pc_plots_v4/mda_paccs_sens.pdf", width = 10)
+ggarrange(plt1, plt2, ncol = 1, nrow = 2)
+dev.off()
+
+
+```
+
+
+# ==============================================================================================================================
+# Section 3: Analysis of single cell/bulk RNA data from mCRPC data sets
+# ==============================================================================================================================
+
+
+```{r}
+#Load data
+scrna <- readRDS("/Users/debanjansaha/Desktop/mCRPC_analysis/R/crpc_analysis/results/crpc_epi20000tme20000seed123.rds")
+scrna <- scrna %>% NormalizeData() %>% FindVariableFeatures() %>% ScaleData()
+scrna <- AddModuleScore(object = scrna, features = paccs_sets, nbin = 10, name = names(paccs_sets))
+
+
+#Run PCA
+scrna <- RunPCA(scrna)
+
+#Run UMAP
+scrna <- RunUMAP(scrna, dims = 1:20)
+
+#Save UMAP embeddings
+umap_coords <- Embeddings(scrna, "umap")
+scrna$UMAP_1 <- umap_coords[, 1]
+scrna$UMAP_2 <- umap_coords[, 2]
+scrna.meta <- scrna@meta.data 
+row.names(scrna.meta) <- scrna.meta$cell_id
+
+#Format Metadata
+#meta <- read_csv(file ="/Users/debanjansaha/Desktop/mCRPC_analysis/R/crpc_analysis/results//crpc_epi20000tme20000seed123_meta.csv" )
+
+#Preprocess for pacc_classifier_cli.py
+#pp <- dplyr::select(scrna.meta, subtype, percent.mt, S.Score, nCount_RNA,nFeature_RNA, G2M.Score,cell_id,coarse_ano, starts_with("HALLMARK"), UMAP_1, UMAP_2 ) %>%  mutate(Percent.MT = percent.mt) %>% merge(dplyr::select(meta, cell_id, cnv_total))  
+
+#pp %>% write.csv(file ="/Users/debanjansaha/Desktop/mCRPC_analysis/R/crpc_analysis/results/crpc_epi20000tme20000seed123_pp.csv" )
+scrna@meta.data
+```
+
+#Load predictions
+```{r}
+#Load predictions 
+pred <- read_csv(file ="/Users/debanjansaha/Desktop/mCRPC_analysis/R/crpc_analysis/results//crpc_epi20000tme20000seed123_predictions.csv" )
+pred <- pred %>% dplyr::select(c("cell_id", ends_with("_prob"), cnv_total)) 
+row.names(pred) <- pred$cell_id
+
+# Confirm rownames match colnames
+all(rownames(pred) %in% row.names(scrna.meta))  # should be TRUE
+
+# Step 2: Reorder metadata to match scrna@meta.data
+pred <- pred[row.names(scrna.meta), , drop = FALSE]
+
+# Step 3: Add the new metadata to the Seurat object
+scrna.meta<- cbind(scrna.meta, pred)
+
+data.frame(scrna.meta) %>%
+  group_by(subtype) %>%
+  summarise(
+    n_missing = sum(is.na(cnv_total)),
+    n_total   = n(),
+    .groups = "drop"
+  )
+
+```
+
+#Bar plots
+```{r}
+p1 <- data.frame(scrna.meta) %>% 
+  ggplot(aes(x = UMAP_1, y = UMAP_2, color = LogisticRegression_PACCs_prob   )) +
+  geom_point(size = 0.1) + 
+  labs(title = "LogReg PCs probabilities", color = "PCs Prob") + theme_bw(base_size = 20) + scale_color_viridis_c(option = "B",limits = c(0.5, 1), na.value = "grey90" ) + theme(aspect.ratio = 1)
+
+p2 <- data.frame(scrna.meta) %>% 
+  ggplot(aes(x = UMAP_1, y = UMAP_2, color = coarse_ano)) +
+  geom_point(size = 0.1) +
+  labs(title = "Cell compartments", color = "Celltype") + theme_bw(base_size = 20) + scale_color_nejm() + theme(aspect.ratio = 1)
+
+p3 <- data.frame(scrna.meta) %>%
+  ggplot(aes(x = UMAP_1, y = UMAP_2, color = subtype)) +
+  geom_point(size = 0.1)  +
+  labs(title = "Histologic variant", color = "Subytpe") + theme_bw(base_size = 20) + scale_color_aaas() + theme(aspect.ratio = 1)
+
+ggsave(p1, filename =  "/Users/debanjansaha/Desktop/pc_plots_v4/crpc_paccs_umap_1.pdf", width = 10)
+ggsave(p2, filename =  "/Users/debanjansaha/Desktop/pc_plots_v4/crpc_paccs_umap_2.pdf", width = 10)
+ggsave(p3, filename =  "/Users/debanjansaha/Desktop/pc_plots_v4/crpc_paccs_umap_3.pdf", width = 10)
+
+```
+
+#Enrichment plots
+```{r}
+#PC by Cell type
+p4 <- scrna.meta %>%
+  dplyr::select(coarse_ano, ends_with("_prob")) %>%
+  pivot_longer(cols = ends_with("_prob"), names_to = "classifier", values_to = "value") %>%
+  mutate(PACCs = ifelse(value >= 0.99, "PCs", "non-PCs")) %>% 
+  filter(!is.na(PACCs)) %>%
+  group_by(classifier, coarse_ano, PACCs) %>%
+  summarise(n = n(), .groups = "drop_last") %>%
+  mutate(proportion = n / sum(n)) %>% 
+  mutate(classifier = gsub(pattern = "_PACCs_prob", replacement = "", x = classifier)) %>% 
+  
+  ggplot(aes(x = coarse_ano, y = proportion, fill = PACCs)) +
+  geom_bar(stat = "identity", position = "stack") + 
+  geom_text(
+    data = \(d) filter(d, PACCs == "PCs", proportion > 0.01),  
+    aes(label = paste0(round(proportion, 3) * 100, "%"),
+        y = 1),                                              
+    vjust = -0.3,                                            
+    size = 5,
+    color = "black",
+    fontface = "bold"
+  ) +
+  facet_wrap(~ classifier, scales = "free_y") +
+  scale_fill_manual(values = c("non-PCs" = "grey80", "PCs" = "navy")) + 
+  theme_bw(base_size = 20) +
+  labs(
+    x = "Cell Type",
+    y = "Proportion of Cells",
+    fill = "Prediction",
+    title = "PC Classification by Cell Type and Model"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(size = 15),
+    panel.grid.major = element_blank()
+  )
+
+#PC by Histology 
+p5 <- scrna.meta %>%
+  dplyr::select(subtype, ends_with("_prob")) %>%
+  pivot_longer(cols = ends_with("_prob"), names_to = "classifier", values_to = "value") %>%
+  mutate(PACCs = ifelse(value >= 0.99, "PCs", "non-PCs")) %>% 
+  filter(!is.na(PACCs)) %>%
+  group_by(classifier, subtype, PACCs) %>%
+  summarise(n = n(), .groups = "drop_last") %>%
+  mutate(proportion = n / sum(n)) %>% 
+  mutate(classifier = gsub(pattern = "_PACCs_prob", replacement = "", x = classifier)) %>% 
+  mutate(subtype = factor(subtype, levels = c("CSPC", "CRPC", "NEPC"))) %>%
+  ggplot(aes(x = subtype, y = proportion, fill = PACCs)) +
+  geom_bar(stat = "identity", position = "stack") + 
+  geom_text(
+    data = \(d) filter(d, PACCs == "PCs", proportion > 0.01),  
+    aes(label = paste0(round(proportion, 3) * 100, "%"),
+        y = 1),                                              
+    vjust = -0.2,                                            
+    size = 5,
+    color = "black",
+    fontface = "bold"
+  ) +
+  facet_wrap(~ classifier, scales = "free_y") +
+  scale_fill_manual(values = c("non-PCs" = "grey80", "PCs" = "navy")) + 
+  theme_bw(base_size = 20) +
+  labs(
+    x = "Histology",
+    y = "Proportion of Cells",
+    fill = "Prediction",
+    title = "PC Classification by Histologic Variant"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(size = 15),
+    panel.grid.major = element_blank()
+  )
+
+pdf(file = "/Users/debanjansaha/Desktop/pc_plots_v4/crpc_paccs_celltype.pdf", width = 10, height = 10)
+ggarrange(p4, ncol = 1, nrow = 1)
+dev.off()
+
+pdf(file = "/Users/debanjansaha/Desktop/pc_plots_v4/crpc_paccs_histo.pdf", width = 10, height = 10)
+ggarrange(p5, ncol = 1, nrow = 1)
+dev.off()
+
+
+```
+
+
+
+
+#DEG
+```{r}
+#PACCs DEG analysis using LogReg classifier results
+scrna.meta <-  data.frame(scrna.meta) %>% mutate(PACCS = case_when(
+  coarse_ano != "Epi_Neuroendo" ~ "non-PACCs",
+  LogisticRegression_PACCs_prob >= 0.99 ~ "PACCs",
+  LogisticRegression_PACCs_prob < 0.99 ~ "non-PACCs"
+)) 
+
+#ggplot(scrna.meta, aes(x = NeuralNet_PACCs_prob)) + geom_density()
+
+scrna@meta.data[,"PACCS"] <- scrna.meta$PACCS
+#DEG analysis
+paccs_deg <- FindMarkers(
+  scrna,
+  ident.1 = "PACCs",
+  ident.2 = "non-PACCs",
+  group.by = "PACCS",   min.pct = 0.1
+)
+
+#Up and downregulated DE genes
+paccs_deg_up <- paccs_deg %>% arrange(-avg_log2FC) %>% dplyr::filter(p_val_adj < 1e-5  & avg_log2FC > 4  &pct.1 > 0.1 )
+paccs_deg_down <- paccs_deg %>% arrange(avg_log2FC) %>% dplyr::filter(p_val_adj < 1e-5  & avg_log2FC < -4  &pct.1 > 0.1 )
+```
+
+#Volcano plot of DEG
+```{r}
+mutate(paccs_deg, sig = case_when(
+  row.names(paccs_deg) %in% c(row.names(paccs_deg_up), row.names(paccs_deg_down)) ~ "Sig",
+  TRUE ~ "NS")) %>% ggplot( aes(x = avg_log2FC, y = -log10(p_val_adj), color = sig)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("Sig" = "navy", "Sig" = "blue", "NS" = "gray")) +
+  geom_vline(xintercept = c(-4, 4), linetype = "dashed", color = "black") +
+  geom_hline(yintercept = -log10(1e-5), linetype = "dashed", color = "black") +
+  labs(
+    title = "Volcano Plot of PACCs DEGs",
+    x = "Log2 Fold Change",
+    y = "-log10 Adjusted p-value",
+    color = "Regulation"
+  ) +
+  theme_minimal()
+c(row.names(paccs_deg_up), row.names(paccs_deg_down))
+
+
+
+```
+
+#GSVA for Hallmark pathways for PACCs
+```{r}
+library(GSVA)
+library(viridis)
+
+df_long <- scrna@meta.data %>%
+  dplyr::select(
+    PACCS,
+    cell_id,
+    coarse_ano,
+    subtype,
+    starts_with("HALLMARK")
+  ) %>%
+  pivot_longer(
+    cols = starts_with("HALLMARK"),
+    names_to = "pathway",
+    values_to = "score"
+  ) %>%
+  filter(
+    coarse_ano == "Epi_Neuroendo",
+    subtype %in% c("CRPC", "NEPC"),
+    !is.na(PACCS)
+  ) %>%
+  mutate(
+    PACCS_group = ifelse(PACCS == "PACCs", "PCs", "non-PCs")
+  )
+
+## ================================
+## 2. Compute mean GSVA per group
+## ================================
+pathway_stats <- df_long %>%
+  group_by(pathway, PACCS_group) %>%
+  summarize(
+    mean_score = mean(score),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    names_from = PACCS_group,
+    values_from = mean_score
+  ) %>%
+  mutate(
+    mean_diff = `PCs` - `non-PCs`
+  ) %>%
+  arrange(desc(mean_diff))
+
+## ================================
+## 3. Join + reorder pathways
+## ================================
+df_plot <- df_long %>%
+  left_join(
+    pathway_stats %>% dplyr::select(pathway, mean_diff),
+    by = "pathway"
+  ) %>%
+  mutate(
+    pathway = fct_reorder(pathway, mean_diff)
+  )
+
+## ================================
+## 4. Plot: ranked boxplots
+## ================================
+
+p <- pathway_stats %>%
+  pivot_longer(
+    cols = c(`PCs`, `non-PCs`),
+    names_to = "group",
+    values_to = "mean_score"
+  ) %>%
+  mutate(
+    pathway = fct_reorder(pathway, mean_diff)
+  ) %>%
+  ggplot(aes(
+    y = pathway,
+    x = mean_score,
+    color = group
+  )) +
+  geom_line(aes(group = pathway), color = "grey70") +
+  geom_point(size = 3) +
+  theme_bw() +
+  labs(
+    x = "Mean GSVA score",
+    y = "Hallmark pathway",
+    color = "PCs group"
+  ) + scale_color_viridis_d(end = 0.5)
+
+ggsave(filename = "/Users/debanjansaha/Desktop/pc_plots_v4/gsva.pdf", plot = p)
+
+```
+
+
+
+#WCDT mCRPC RNA-seq
+```{r}
+#Validation of PACCs DEG on WCDT samples
+#load("/Users/debanjansaha/Desktop/mCRPC_analysis/data/WCDT/alternative_promoter_data_2024/environment_deeprna_build_reproduce_20230418_NCB_revision.RData")
+
+#Load metadata from Quigly et al. 2018 paper
+wcdt_meta <- read.csv(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/paccs_plots/wcdt_mcrpc_metadata.csv")
+
+#GSVA scoring for bulk RNA-seq data
+expr_mat <- read.table(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/data/WCDT/2018_04_15_matrix_rna_tpm.txt", header = T)
+expr_mat <- column_to_rownames(expr_mat, var = "IDENTIFIER")
+```
+
+
+```{r}
+#Filter PACCs DEG ensembl ids
+gene_sets <- list(PACCs_score = c(row.names(paccs_deg_up) ) )
+gparams <- ssgseaParam(exprData = as.matrix(log1p(expr_mat)),
+                      geneSets = gene_sets)
+gsva_result <- gsva(gparams)
+ucsf_lcm_tpm <- gsva_result %>% 
+  t() %>% data.frame() %>% 
+  rownames_to_column(var= "match_id") %>% 
+  mutate(match_id = gsub(pattern = "\\.", replacement = "-", x = match_id)) %>% 
+  dplyr::filter(!is.na(match_id)) %>% 
+  left_join(wcdt_meta,by = c("match_id" = "IDENTIFIER")) #%>% left_join(clinical_features_eu,by = c("match_id" = "sample_id"))
+
+#Plots for aneuploidy and polyploidy 
+comparisons <- list(
+  c("2", "3"),
+  c("2", "4")
+)
+
+p1 <- ucsf_lcm_tpm   %>% mutate(estimated.ploidy = as.factor(round(estimated.ploidy) )) %>%  ggplot(aes(y = PACCs_score, x = estimated.ploidy)) + geom_violin(fill = viridis(n = 1))  + theme_bw(base_size = 20) + stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format" , comparisons = comparisons) + stat_summary(
+    fun = median,
+    fun.min = median,
+    fun.max = median,
+    geom = "crossbar",
+    width = 0.5,
+    color = "grey"
+  ) + xlab("Estimated Ploidy") + ylab("PACCs score")
+
+comparisons <- list(
+  c("0.1", "0.2"),
+    c("0.1", "0.3"),
+    c("0.1", "0.4"),
+    c("0.1", "0.5")
+)
+
+p2 <- ucsf_lcm_tpm   %>% mutate(percent.copy.altered = as.factor(round(percent.copy.altered, 1) )) %>%  ggplot(aes(y = PACCs_score, x = percent.copy.altered)) + geom_violin(fill = viridis(n = 1, direction = -1, end = 0.5))  + scale_fill_viridis_d(option = "D") + theme_bw(base_size = 20) + stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format" , comparisons = comparisons) + stat_summary(
+    fun = median,
+    fun.min = median,
+    fun.max = median,
+    geom = "crossbar",
+    width = 0.5,
+    color = "grey"
+  ) + xlab("Percent Copy Altered") + ylab("PACCs score")
+
+pdf("/Users/debanjansaha/Desktop/bulk_paccs_sv.pdf")
+p3 <- ucsf_lcm_tpm %>% dplyr::select(c(PACCs_score), starts_with("X"), mutation_count) %>% mutate(mutation_count = log1p(mutation_count)) %>% pivot_longer(cols = -PACCs_score) %>% filter(name %in% c("X..deletions", "X..deletions.microhom.")) %>%   ggplot(aes(x = PACCs_score, y = value  )) + facet_wrap(
+  ~ name,
+  scales = "free_y",
+  labeller = labeller(
+    name = c(
+      "mutation_count" = "Mutation count",
+      "X..deletions" = "Deletions",
+      "X..deletions.microhom." = "Deletions (microhomology)",
+      "X..duplications" = "Duplications",
+      "X..insertions" = "Insertions",
+      "X..inversions" = "Inversions"
+    )
+  )
+) + geom_point(alpha = 0.5)  + theme_bw(base_size = 20) + stat_cor(method = "pearson") + geom_smooth(method = "lm" , colour = viridis(1, begin = 0.2, option = "A")) + xlab("PCs score") + ylab("Count")
+dev.off() 
+
+
+p4 <- ucsf_lcm_tpm %>% dplyr::select(c(PACCs_score), starts_with("X"), mutation_count) %>% mutate(mutation_count = log1p(mutation_count)) %>% pivot_longer(cols = -PACCs_score) %>% filter(!name %in% c("X..deletions", "X..deletions.microhom.")) %>%   ggplot(aes(x = PACCs_score, y = value  )) + facet_wrap(
+  ~ name,
+  scales = "free_y",
+  labeller = labeller(
+    name = c(
+      "mutation_count" = "Mutation count",
+      "X..deletions" = "Deletions",
+      "X..deletions.microhom." = "Deletions (microhomology)",
+      "X..duplications" = "Duplications",
+      "X..insertions" = "Insertions",
+      "X..inversions" = "Inversions"
+    )
+  )
+) + geom_point(alpha = 0.5)  + theme_bw(base_size = 20) + stat_cor(method = "pearson") + geom_smooth(method = "lm" , colour = viridis(1, begin = 0.3, option = "A")) + xlab("PCs score") + ylab("Count")
+dev.off() 
+
+
+pdf("/Users/debanjansaha/Desktop/pc_plots_v4/bulk_paccs.pdf", width = 10)
+ggarrange(p1, p2, ncol = 2, nrow = 1)
+dev.off()
+
+
+ggsave(p3, filename = "/Users/debanjansaha/Desktop/pc_plots_v4/mut1.pdf", width = 10)
+ggsave(p4, filename = "/Users/debanjansaha/Desktop/pc_plots_v4/mut2.pdf", width = 10)
+
+
+```
+
+
+
+#CNV phylo tree
+```{r}
+library(phangorn)
+library(ggtree)
+library(cluster)
+
+
+copykat_crpc <- readRDS(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/20000_copkyat_cn_matrix.rds")
+set.seed(123)
+# Step 1: Get one representative cell per Seurat cluster for PACCs
+pacc_meta <- scrna@meta.data %>%
+  filter(coarse_ano == "Epi_Neuroendo" & !is.na(PACCS)) %>% 
+  mutate(cell_name = rownames(.))
+
+
+
+# Get medoid (most central cell) from each cluster based on UMAP
+medoid_cells <- pacc_meta %>%
+  group_by(seurat_clusters ,patient ) %>%
+  mutate(
+    # Calculate distance to cluster center
+    umap1_center = mean(UMAP_1),
+    umap2_center = mean(UMAP_2),
+    dist_to_center = sqrt((UMAP_1 - umap1_center)^2 + (UMAP_2 - umap2_center)^2)
+  ) %>%
+  # Pick cell closest to center
+  slice_min(dist_to_center, n = 5000) %>%
+  ungroup() %>%
+  pull(cell_name)
+
+print(paste("Selected", length(medoid_cells), "representative cells from", 
+            length(unique(pacc_meta$seurat_clusters)), "clusters"))
+
+# Step 2: Get CN profiles for these representative cells
+cn_mat <- copykat_crpc
+
+# Convert cell names to match copykat format
+medoid_names_converted <- gsub(pattern = "-", replacement = "\\.", medoid_cells)
+
+# Extract CN data for medoids
+mediods <- cn_mat[, colnames(cn_mat) %in% medoid_names_converted]
+
+# Remove metadata columns if present
+mediods <- mediods %>%
+  dplyr::select(-any_of(c("chrom", "chrompos", "abspos", "coord"))) %>%
+  as.matrix()
+
+# Remove rows with too many NAs
+mediods <- mediods[rowSums(is.na(mediods)) < ncol(mediods), ]
+
+
+#colnames(mediods) %>% write.table(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/crpc_analysis/results/mediod_cellnames.txt", quote = F, col.names = F, row.names = F)
+
+```
+
+```{r}
+patients <- unique(pacc_meta$patient)
+patients <- c("MSK-HP17", "MSK-HP18")
+
+ lapply(patients, function(pid) {
+
+  cat("Patient:", pid, "\n")
+
+  # cells for this patient
+  ids <- pacc_meta %>%
+    filter(patient == pid, cell_name %in% medoid_cells) %>%
+    pull(cell_name) %>%  gsub(pattern = "-", replacement = "\\.")
+
+
+  # subset medoids
+  m <- mediods[, colnames(mediods) %in% ids, drop = FALSE]
+    if (ncol(m) < 3) {
+    message("Skipping patient ", pid, " (", length(ids), " cells)")
+    return(NULL)
+  }
+  # distance + tree
+  med_dist <- dist(t(m), method = "manhattan")
+  tree <- fastme.bal(med_dist)
+
+  # annotation
+  df <- pacc_meta %>%
+    filter(cell_name %in% gsub(pattern = "\\.", replacement = "-", x = ids)) %>%
+    mutate(label = gsub("-", "\\.", cell_name)) %>%
+    filter(label %in% tree$tip.label) %>%
+    dplyr::select(label, PACCS) %>%
+    filter(!is.na(PACCS))
+
+  # plot
+  p <- ggtree(tree) %<+% df +
+    geom_tree(aes(color = PACCS)) +
+    geom_tippoint(aes(color = PACCS, alpha = PACCS), size = 2) +
+    geom_treescale() +
+    theme_tree2() +
+    theme(legend.position = "right") +
+    labs(
+      color = "PCs",
+      title = paste("Patient", pid)
+    ) +
+    scale_colour_viridis_d(option = "D", end = 0.5,breaks = c("non-PACCs", "PACCs"),                
+    labels = c("Non-PC", "PC"),          
+    na.translate = FALSE ) +                
+scale_alpha_discrete(guide = "none") + theme(
+    plot.title = element_text(size = 16),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  )
+    ggsave(filename = paste0("/Users/debanjansaha/Desktop/pc_plots_v4/", pid, ".pdf" ), plot = p)
+  return(p)
+})
+
+ 
+ 
+
+```
+
+
+```{r}
+
+#Use Hierarchical cluster tree from CopyKat - not ultrametric so allows distance metric
+tree <- readRDS(file = "/Users/debanjansaha/Desktop/mCRPC_analysis/R/crpc_analysis/results/epi20000tme20000seed123_copykat_clustering_results.rds")
+
+
+#Helper to compute normalized shannon entropy 
+compute_pacc_entropy <- function(groups, labels) {
+  # labels: named vector (tip -> PACCS status)
+  # groups: named vector (tip -> CN cluster)
+
+  pacc_tips <- names(labels)[labels == "PACCs"]
+  if (length(pacc_tips) < 2) return(NA_real_)
+
+  #Get groups of each tips from clustering
+  clades <- groups[pacc_tips]
+  #Proportion calculation of each group
+  p <- table(clades)
+  p <- p / sum(p)
+  
+  #Information entropy
+  H <- -sum(p * log(p))
+  #Normalization to max entropy
+  H_norm <- H / log(length(p))
+
+  return(H_norm)
+}
+
+patients <- unique(pacc_meta$patient)
+
+entropy_results <- lapply(patients, function(pid) {
+
+  cat("Patient:", pid, "\n")
+
+  ## ---- subset cells ----
+  ids <- pacc_meta %>%
+    filter(patient == pid, cell_name %in% medoid_cells) %>%
+    pull(cell_name) %>%
+    gsub("-", "\\.", .)
+
+  m <- mediods[, colnames(mediods) %in% ids, drop = FALSE]
+
+  if (ncol(m) < 5) {
+    message("Skipping patient ", pid)
+    return(NULL)
+  }
+
+  #Get distance, in this case use manhattan L1  
+  d <- dist(t(m), method = "manhattan")
+
+  #Hclustering
+  hc <- hclust(d, method = "average") 
+
+ #Cut the tree to get groupings
+  groups <- cutree(hc, h = quantile(hc$height, 0.6))
+
+  #Label PCs
+  labels <- pacc_meta %>%
+    filter(patient == pid) %>%
+    mutate(label = gsub("-", "\\.", cell_name)) %>%
+    filter(label %in% names(groups)) %>%
+    dplyr::select(label, PACCS) %>%
+    deframe()
+
+  #Get normalized entropy per patient generated tree and return 
+  entropy <- compute_pacc_entropy(groups, labels)
+
+  return(data.frame(
+    patient = pid,
+    entropy = entropy,
+    n_cells = length(groups),
+    n_paccs = sum(labels == "PACCs", na.rm = TRUE)
+  ))
+})
+
+entropy_df <- bind_rows(entropy_results)
+
+pdf("/Users/debanjansaha/Desktop/pc_plots_v4/entropy_paccs.pdf", width = 10)
+ggplot(entropy_df,aes( y = patient, x = entropy, size = n_paccs, color = n_cells)) + geom_point() + theme_bw(base_size = 20) + scale_color_viridis_c(option = "D", name = "Number of Cells") + xlab("Normalized Shannon Entropy") + ylab("Patient ID") + scale_size_continuous(
+    name = "Number of PCs",          
+    range = c(2, 8),                
+    breaks = c(0, 50, 100)         
+  )
+dev.off()
+```
+
+
+
+
+#Plotting of training and validation results
+```{r}
+#Plot AUC of training data (PCA with C)
+library(pROC)
+pc3_c_train_auc <- read.table(file = "/Users/debanjansaha/Desktop/pc_plots_v4/paccs_plots_v2/pca_c_class_train_results.tsv", header = T)
+
+p1 <- pc3_c_train_auc %>% mutate(Fold = 1:n()) %>%
+  pivot_longer(
+    cols = -Fold,
+    names_to = "Model",
+    values_to = "AUC", 
+  ) %>% ggplot(aes(x = Fold, y = AUC, fill = Model)) + scale_fill_viridis_d(option = "B") + geom_col(position = "dodge") + theme_bw(base_size = 20) + ylim(c(0,1))
+
+#Plot Feature importances in training data
+pc3_c_feature <- read.table(file = "/Users/debanjansaha/Desktop/pc_plots_v4/paccs_plots_v2/pca_c_feature_import.tsv", header = T)
+
+p2 <- pc3_c_feature %>% ggplot(aes(x = Feature, y = Importance, fill = Model)) + scale_fill_viridis_d(option = "E") + geom_col(position = "dodge") + theme_bw(base_size = 20) + ylim(c(0,1))  + scale_x_discrete(labels = c(
+    cnv_total    = "Total CNV",
+    G2M.Score    = "G2M Score",
+    nCount_RNA   = "UMI Count",
+    nFeature_RNA = "Gene Count",
+    Percent.MT   = "% Mito",
+    S.Score      = "S Phase Score"
+  ))
+
+#Plot AUC of validation data (PCA with D, MDA with C and D)
+pc3_d_valid_auc <- read.table(file = "/Users/debanjansaha/Desktop/pc_plots_v4/paccs_plots_v2/pca_d_results.tsv", header = T)
+mda_c_valid_auc <- read.table(file = "/Users/debanjansaha/Desktop/pc_plots_v4/paccs_plots_v2/mda_c_results.tsv", header = T)
+mda_d_valid_auc <- read.table(file = "/Users/debanjansaha/Desktop/pc_plots_v4/paccs_plots_v2/mda_d_results.tsv", header = T)
+
+
+
+p3 <- rbind(pc3_d_valid_auc %>%
+  dplyr::select(ends_with("WGD_prob")) %>%
+  map_dbl(~ as.numeric(auc(pc3_d_valid_auc$label, .x)))  %>%  
+    enframe(name = "model", value = "AUC") %>% mutate(Data = "PC3 Docetaxel"), 
+  mda_c_valid_auc %>% 
+    dplyr::select(ends_with("WGD_prob")) %>%
+  map_dbl(~ as.numeric(auc(mda_c_valid_auc$label, .x))) %>%
+  enframe(name = "model", value = "AUC")  %>% mutate(Data = "MDA Cisplatin") )  %>% 
+  rbind(
+    mda_d_valid_auc %>% dplyr::select(ends_with("WGD_prob")) %>%
+  map_dbl(~ as.numeric(auc(mda_d_valid_auc$label, .x))) %>%
+  enframe(name = "model", value = "AUC")   %>% mutate(Data = "MDA Docetaxel")
+  ) %>% ggplot(aes(y = model, x = AUC, fill = Data)) + scale_fill_viridis_d(end = 0.3) + geom_col(position = "dodge") + theme_bw(base_size = 20) + xlim(c(0,1))   + scale_y_discrete(labels = c(
+    XGBoost_WGD_prob    = "XGBoost",
+    SVM_WGD_prob    = "SVM",
+    RandomForest_WGD_prob   = "RandomForest",
+    NeuralNet_WGD_prob = "NeuralNet",
+    LogisticRegression_WGD_prob   = "LogisticRegression"
+  ))
+ 
+p4 <- rbind(
+  dplyr::select(pc3_d_valid_auc, label, ends_with("WGD_prob")) %>% 
+    mutate(Data = "PC3 Docetaxel"),
+  dplyr::select(mda_c_valid_auc, label, ends_with("WGD_prob")) %>% 
+    mutate(Data = "MDA Cisplatin"),
+  dplyr::select(mda_d_valid_auc, label, ends_with("WGD_prob")) %>% 
+    mutate(Data = "MDA Docetaxel")
+)  %>% 
+  pivot_longer(cols = -c(label, Data),
+               names_to = "Model",
+               values_to = "PACCs_Probability") %>% 
+  mutate(Model = recode(Model,
+  "XGBoost_WGD_prob"    = "XGBoost",
+    "SVM_WGD_prob"    = "SVM",
+    "RandomForest_WGD_prob"   = "RandomForest",
+    "NeuralNet_WGD_prob" = "NeuralNet",
+    "LogisticRegression_WGD_prob"   = "LogisticRegression"
+)) %>%
+  ggplot(aes(x = as.factor(label),
+             y = PACCs_Probability,
+             fill = as.factor(label))) +
+  geom_violin(scale = "width", trim = FALSE) +
+  facet_grid(Data ~ Model) +
+  theme_bw(base_size = 20) +
+  scale_fill_viridis_d(option = "E", end = 0.5, name = "Cell Type",
+    labels = c("0" = "Non-PCs",
+               "1" = "PCs")) + xlab("Cell Type") + ylab("PCs probability")  + theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+ggsave(filename = "/Users/debanjansaha/Desktop/pc_plots_v4/train_AUC.pdf", plot = p1, width = 10)
+ggsave(filename = "/Users/debanjansaha/Desktop/pc_plots_v4/train_import.pdf", plot = p2, width = 10)
+ggsave(filename = "/Users/debanjansaha/Desktop/pc_plots_v4/valid_AUC.pdf", plot = p3, width = 10)
+ggsave(filename = "/Users/debanjansaha/Desktop/pc_plots_v4/valid_prob.pdf", plot = p4, width = 15)
+
+
+```
+
