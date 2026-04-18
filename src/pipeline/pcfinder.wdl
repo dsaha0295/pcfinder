@@ -1,5 +1,6 @@
 version 1.0
 
+# Full pipeline to infer CNV burden, extract polyploid features, and run classifiers
 workflow PCFinder_pipeline {
     input {
         File   seurat_obj
@@ -18,8 +19,6 @@ workflow PCFinder_pipeline {
         File?  spikein_rds
         String spikein_malignancy_col = "malignancy"
         String spikein_malignancy_val = "Non-Malignant"
-        String spikein_id_col         = "ID"
-        String spikein_id_val         = "LE"
     }
 
     call QuantifyFeatures {
@@ -36,8 +35,6 @@ workflow PCFinder_pipeline {
             spikein_rds            = spikein_rds,
             spikein_malignancy_col = spikein_malignancy_col,
             spikein_malignancy_val = spikein_malignancy_val,
-            spikein_id_col         = spikein_id_col,
-            spikein_id_val         = spikein_id_val
     }
 
     call RunClassifiers {
@@ -54,6 +51,9 @@ workflow PCFinder_pipeline {
     }
 }
 
+# Script for CNV inference and feature extraction, assuming one seurat object
+# with malignant and non-malignant/reference cell types. Optionally can provide
+# second reference seurat object
 task QuantifyFeatures {
     input {
         File   seurat_rds
@@ -69,16 +69,12 @@ task QuantifyFeatures {
         File?  spikein_rds
         String spikein_malignancy_col = "malignancy"
         String spikein_malignancy_val = "Non-Malignant"
-        String spikein_id_col         = "ID"
-        String spikein_id_val         = "LE"
     }
 
     String spikein_flags = if defined(spikein_rds)
         then "--spikein " + spikein_rds +
              " --spikein_malignancy_col " + spikein_malignancy_col +
              " --spikein_malignancy_val " + spikein_malignancy_val +
-             " --spikein_id_col "         + spikein_id_col +
-             " --spikein_id_val "         + spikein_id_val
         else ""
 
     command <<<
@@ -109,7 +105,7 @@ task QuantifyFeatures {
         File output_csv = "~{id}_features.csv"
     }
 }
-
+# Script for running polyploid cancer cell classifiers, using CSV from prior step 
 task RunClassifiers {
     input {
         File   features_csv

@@ -15,7 +15,7 @@ from sklearn.svm import SVC
 from sklearn.neural_network import MLPClassifier
 
 
-# ── Default core features (no HALLMARK scores) ────────────────────────────────
+#Required column features names
 DEFAULT_FEATURES = [
     "Percent.MT",
     "S.Score",
@@ -25,20 +25,18 @@ DEFAULT_FEATURES = [
     "G2M.Score",
 ]
 
-
+#Function to resolve colnames in df
 def resolve_features(df: pd.DataFrame, feature_cols: list[str]) -> list[str]:
     """
-    Match requested feature names against df columns, accounting for the
-    AddModuleScore numeric suffix. Returns the actual column names found in df.
+    Match requested feature names against df columns. Returns the actual column names found in df.
     Raises if any requested feature is missing.
     """
-    # Build a mapping stripped_name → actual_col for every column in df
-
+    #Build a mapping stripped_name → actual_col for every column in df
     resolved = []
     missing  = []
     for feat in feature_cols:
         if feat in df.columns:
-            resolved.append(feat)                   # exact match
+            resolved.append(feat)                   
         else:
             missing.append(feat)
 
@@ -49,7 +47,7 @@ def resolve_features(df: pd.DataFrame, feature_cols: list[str]) -> list[str]:
         )
     return resolved
 
-
+#Parser function
 def main():
     parser = argparse.ArgumentParser(
         description="Run trained PACCs classifiers on new data",
@@ -57,7 +55,7 @@ def main():
     )
     parser.add_argument(
         "input_csv",
-        help="Input CSV file with features (output of copykat_ploidy.R)"
+        help="Input CSV file with features (output of pcfinder_cnv_estimation.R)"
     )
     parser.add_argument(
         "--out",
@@ -80,15 +78,6 @@ def main():
         )
     )
     parser.add_argument(
-        "--features_file",
-        default=None,
-        metavar="PATH",
-        help=(
-            "Path to a plain-text file with one feature name per line.\n"
-            "Overrides --features if both are provided."
-        )
-    )
-    parser.add_argument(
         "--drop_na",
         action="store_true",
         default=True,
@@ -103,40 +92,36 @@ def main():
 
     args = parser.parse_args()
 
-    # ── Resolve feature list ──────────────────────────────────────────────────
-    if args.features_file:
-        with open(args.features_file) as f:
-            feature_cols = [line.strip() for line in f if line.strip()]
-        print(f"Loaded {len(feature_cols)} features from {args.features_file}")
-    elif args.features:
+    #Add features after parsing else default to expected colnames
+    if args.features:
         feature_cols = args.features
     else:
         feature_cols = DEFAULT_FEATURES
         print(f"Using default features: {feature_cols}")
 
-    # ── Load input ────────────────────────────────────────────────────────────
+    #Load input csv from pcfinder_cnv_estimation.R with metadata and CNV burden for classifiers 
     print(f"Loading input: {args.input_csv}")
     df = pd.read_csv(args.input_csv)
     print(f"  {df.shape[0]} cells, {df.shape[1]} columns")
 
-    # ── Validate model directory ──────────────────────────────────────────────
+    #Check if dir with pickled models exists
     if not os.path.isdir(args.model_dir):
         raise FileNotFoundError(f"Model directory not found: {args.model_dir}")
     scaler_path = os.path.join(args.model_dir, "scaler.pkl")
     if not os.path.exists(scaler_path):
         raise FileNotFoundError(f"scaler.pkl not found in {args.model_dir}")
 
-    # ── Match features to actual column names (handles AddModuleScore suffix) ─
+    #Match features to actual column names
     resolved_cols = resolve_features(df, feature_cols)
     if resolved_cols != feature_cols:
-        print("  Resolved feature name mismatches (AddModuleScore suffix):")
+        print("  Resolved feature name mismatches:")
         for req, res in zip(feature_cols, resolved_cols):
             if req != res:
                 print(f"    {req!r} → {res!r}")
 
-    # ── Subset and clean ──────────────────────────────────────────────────────
+    #Subset input dataframe to resolved columns
     X = df[resolved_cols].copy()
-
+    #Drop if NA found
     if args.drop_na:
         before = len(X)
         X = X.dropna()
@@ -147,18 +132,18 @@ def main():
 
     print(f"Running classifiers on {X.shape[0]} cells with {X.shape[1]} features")
 
-    # ── Scale ─────────────────────────────────────────────────────────────────
+    #Scale with scaler fitted to training cell line data
     scaler  = joblib.load(scaler_path)
     X_scaled = scaler.transform(X)
 
-    # ── Run each model ────────────────────────────────────────────────────────
+    #Run each model
     model_files = [
         f for f in os.listdir(args.model_dir)
         if f.endswith(".pkl") and f != "scaler.pkl"
     ]
     if not model_files:
         raise FileNotFoundError(f"No model .pkl files found in {args.model_dir}")
-
+    #Load each classifier 
     for model_file in sorted(model_files):
         model_name = model_file.replace(".pkl", "")
         model = joblib.load(os.path.join(args.model_dir, model_file))
@@ -166,12 +151,12 @@ def main():
         if not hasattr(model, "predict_proba"):
             print(f"  Skipping {model_name}: no predict_proba method")
             continue
-
+        #Predict on scaled dataframe, output polyploid cancer cell probability
         prob = model.predict_proba(X_scaled)[:, 1]
-        df[f"{model_name}_PACCs_prob"] = prob
+        df[f"{model_name}_PCs_prob"] = prob
         print(f"  {model_name}: done")
 
-    # ── Save ──────────────────────────────────────────────────────────────────
+    #Save to output dir
     df.to_csv(args.out, index=False)
     print(f"Predictions saved to {args.out}")
 
