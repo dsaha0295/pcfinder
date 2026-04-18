@@ -1,0 +1,1 @@
+python ../../../results/paccs_classifiers_final_ver/paccs_classifier_biopsy_final_ver_cli.py crpc_epi20000tme20000seed123_pp.csv --model_dir ../../../results/paccs_classifiers_final_ver --out crpc_epi20000tme20000seed123_predictions.csv 
