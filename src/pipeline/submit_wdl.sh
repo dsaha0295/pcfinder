@@ -11,17 +11,17 @@ ${PROJECT_DIR}:${PROJECT_DIR} "
 
 
 bsub \
-  -J pcfinder \
+  -J sparc \
   -G compute-christophermaher \
   -g /saha.d/max100 \
   -q general \
   -n 4 \
   -R 'select[mem>16000] rusage[mem=16000]' \
   -M 16000000 \
-  -oo Logs/pcfinder.out \
-  -eo Logs/pcfinder.err \
+  -oo Logs/sparc.out \
+  -eo Logs/sparc.err \
   -a 'docker(openjdk:11.0.11-jdk-slim)' /usr/local/openjdk-11/bin/java -Xms4g -Xmx12g \
        -Dconfig.file=cromwell_compute1.conf \
        -jar cromwell-86.jar \
-       run "${PROJECT_DIR}"/R/crpc_analysis/pcfinder.wdl \
-       --inputs pcfinder.json
+       run "${PROJECT_DIR}"/R/crpc_analysis/sparc.wdl \
+       --inputs sparc.json

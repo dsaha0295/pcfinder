@@ -1,6 +1,6 @@
 #!/usr/bin/env Rscript
 # =============================================================================
-# pcfinder_cnv_estimation.R
+# sparc_cnv_inference.R
 #
 # Runs CopyKAT CNV inference on a user-supplied Seurat object. Step 1 of WDL 
 # pipeline for PC inference. Perference is to have malignant cells with presumed
@@ -11,7 +11,7 @@
 # Burden as called by CopyKat
 
 # Usage:
-#   Rscript pcfinder_cnv_estimation.R \
+#   Rscript sparc_cnv_inference.R \
 #     --seurat      /path/to/object.rds \
 #     --epi_count   4000 \
 #     --tme_count   4000 \

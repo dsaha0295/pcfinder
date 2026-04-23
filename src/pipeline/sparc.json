@@ -1,0 +1,19 @@
+{
+    "SPARC_pipeline.seurat_obj": "/storage1/fs1/christophermaher/Active/maherlab/saha.d/projects/prostate_ploidy/data/crpc/GSE264573_msk.integrated.remove.cellcycle.allcells.rds",
+    "SPARC_pipeline.sample_id": "my_sample",
+    "SPARC_pipeline.celltype_col": "coarse_ano",
+    "SPARC_pipeline.epi_label": "Epi_Neuroendo",
+
+    "SPARC_pipeline.epi_count": 2000,
+    "SPARC_pipeline.tme_count": 2000,
+    "SPARC_pipeline.seed": 42,
+    "SPARC_pipeline.mt_col": "percent.mt",
+
+    "SPARC_pipeline.copykat_script": "/storage1/fs1/christophermaher/Active/maherlab/saha.d/projects/prostate_ploidy/R/crpc_analysis/sparc_cnv_inference.R",
+    "SPARC_pipeline.classifier_script": "/storage1/fs1/christophermaher/Active/maherlab/saha.d/projects/prostate_ploidy/R/crpc_analysis/sparc_run_models.py",
+    "SPARC_pipeline.model_dir": "/storage1/fs1/christophermaher/Active/maherlab/saha.d/projects/prostate_ploidy/R/crpc_analysis/models"
+
+
+
+
+}

@@ -1,7 +1,8 @@
 version 1.0
 
-# Full pipeline to infer CNV burden, extract polyploid features, and run classifiers
-workflow PCFinder_pipeline {
+# SPARC: single cell Polyploidy analysis via RNA Characterization
+# Full SPARC pipeline to infer CNV burden, extract polyploid features, and run classifiers
+workflow SPARC_pipeline {
     input {
         File   seurat_obj
         String sample_id

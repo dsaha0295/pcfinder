@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-
+"""Runs sparc_run_models.py to take in CSV file from sparc_cnv_inference with features related to polyploidy cancer cells, including
+CNV burden, followed by scaling and passing through 5 ML/DL classifiers (LogReg, RF, XGBoost, SVM, MLP) to determine probability
+of polyploidy cancer cells. Output is CSV file with column denoting PC probability. 
+"""
 import argparse
 import pandas as pd
 import joblib
@@ -55,12 +58,12 @@ def main():
     )
     parser.add_argument(
         "input_csv",
-        help="Input CSV file with features (output of pcfinder_cnv_estimation.R)"
+        help="Input CSV file with features (output of sparc_cnv_inference.R)"
     )
     parser.add_argument(
         "--out",
         default="paccs_predictions.csv",
-        help="Output CSV file for predictions (default: paccs_predictions.csv)"
+        help="Output CSV file for predictions (default: pcs_predictions.csv)"
     )
     parser.add_argument(
         "--model_dir",
