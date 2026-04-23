@@ -1,5 +1,5 @@
 # SPARC: Single Cell Polyploidy analysis via RNA Characterization
-
+![SPARC Graphical Abstract](results/pc_plots_v4/SPARC_graphical_abstract.png)
 A computational pipeline for identifying polyploid cancer cells in single-cell RNA-seq data.
 
 ---
